@@ -217,6 +217,57 @@ fn big_font_header_and_escape_ranges() {
     assert!(b.has_shape(0x82A0));
 }
 
+/// gbcbig.shx pads its font record's name with a second NUL byte before the fields (which say
+/// 64 units above): read as the padding, the font looked one unit tall and drew every CJK
+/// character 64 times too large.
+#[test]
+fn big_font_header_after_padding_nul_bytes() {
+    let f = font("*BIGFONT 1,1,081,09F\n*0,4,padded\n0,64,2,0\n*082A0,7,square\n1,080,084,088,08C,2,080,0\n");
+    assert_eq!((f.kind(), f.above(), f.below()), (ShxKind::BigFont, 64.0, 2.0));
+    assert_eq!(f.units_per_height(), 64.0);
+}
+
+/// A subshape's vector scale (codes 3 and 4) stops at the subshape: gbcbig.shx's glyphs call a
+/// shared subshape that divides their vectors and then place themselves with displacements in
+/// full design units. Letting the division reach the caller shrank each character about eight
+/// times.
+#[test]
+fn a_subshapes_vector_scale_does_not_reach_its_caller() {
+    let max_x = |f: &ShxFont, n: u16| -> f64 { f.glyph(n, false).unwrap().strokes.iter().flatten().map(|p| p.x).fold(f64::MIN, f64::max) };
+    // The subshape multiplies vector lengths by 4 (a 16-unit vector); the glyph then moves
+    // (20, 20), so the pen ends at (36, 20) — with the scale leaking it would be (96, 80).
+    let big = font("*BIGFONT 1,1,081,09F\n*0,4,scale\n8,0,0,0\n*081,5,DIV\n4,4,040,0\n*082A0,9,glyph\n7,081,8,(20,20),0\n");
+    assert!(max_x(&big, 0x82A0) <= 40.0, "big font displacement stays in font units");
+    let shapes = font("*1,5,DIV\n4,4,040,0\n*2,9,glyph\n7,1,8,(20,20),0\n");
+    assert!(max_x(&shapes, 2) <= 40.0, "shape file displacement stays in font units");
+}
+
+/// A big font's characters take a square cell, wherever their pen stops: gbcbig.shx's glyphs
+/// end short of the cell, and using the pen's end as the advance ran every CJK label together.
+#[test]
+fn big_font_characters_advance_by_their_cell() {
+    // 8 units above; the glyph moves the pen only 4 units.
+    let f = font("*BIGFONT 1,1,081,09F\n*0,4,cell\n8,0,0,0\n*082A0,4,short\n1,040,2,0\n");
+    let t = ShxText::new(None, Some(std::sync::Arc::new(f)), "cadcraft big", false);
+    let sh = shape(&t, "\u{3042}\u{3042}", 8.0, 1.0, 0.0);
+    assert!((sh.width - 16.0).abs() < 1e-9, "two cells at height 8, got {}", sh.width);
+    assert!((width(&t, "\u{3042}\u{3042}", 8.0, 1.0) - 16.0).abs() < 1e-9);
+}
+
+/// A big font can declare a height its shapes don't use: gbcbig.shx declares 64 and draws to
+/// 82–89, which drew Chinese text 1.4 times the text height where AutoCAD draws it at the text
+/// height. Text scales by what the shapes draw; the cell stays the record's `above`.
+#[test]
+fn a_big_font_scales_by_what_its_shapes_draw() {
+    let f = font("*BIGFONT 1,1,081,09F\n*0,4,tall\n8,0,0,0\n*082A0,8,tall glyph\n2,8,(0,0),1,8,(0,12),0\n");
+    assert!((f.design_height() - 12.0).abs() < 1e-9, "{}", f.design_height());
+    let t = ShxText::new(None, Some(std::sync::Arc::new(f)), "cadcraft tall", false);
+    let sh = shape(&t, "\u{3042}", 10.0, 1.0, 0.0);
+    let (lo, hi) = sh.strokes.iter().flatten().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
+    assert!((hi - lo - 10.0).abs() < 1e-6, "glyph height {} at text height 10", hi - lo);
+    assert!((sh.width - 8.0 * 10.0 / 12.0).abs() < 1e-6, "cell {}", sh.width);
+}
+
 #[test]
 fn cyclic_and_deep_subshapes_are_bounded() {
     let f = font("*1,3,SELF\n7,1,0\n*2,3,A\n7,3,0\n*3,3,B\n7,2,0\n*4,3,MISSING\n7,9,0\n");

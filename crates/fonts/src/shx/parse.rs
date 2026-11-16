@@ -81,7 +81,16 @@ impl Font {
         let Some(bytes) = data.get(start..end) else { return };
         let Some(nul) = bytes.iter().position(|b| *b == 0) else { return };
         let name = (start, start + nul);
-        let program = (start + nul + 1, end);
+        let mut program_start = start + nul + 1;
+        // A big font's font record may pad the name with extra NUL bytes before its fields
+        // (gbcbig.shx has two). Read the fields from the first byte that isn't padding: taking
+        // the padding as `above` made a 64-unit font look 64 times too tall.
+        if number == 0 && self.kind == ShxKind::BigFont {
+            while program_start < end && data.get(program_start) == Some(&0) {
+                program_start += 1;
+            }
+        }
+        let program = (program_start, end);
         if number == 0 {
             if !self.header {
                 self.font_record(data.get(program.0..program.1).unwrap_or_default(), data.get(name.0..name.1).unwrap_or_default());
@@ -128,6 +137,7 @@ impl Font {
             records: self.records,
             cache: RwLock::default(),
             hebrew: std::sync::OnceLock::new(),
+            design: std::sync::OnceLock::new(),
         })
     }
 }

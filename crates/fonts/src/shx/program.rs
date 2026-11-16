@@ -297,8 +297,19 @@ impl Pen<'_> {
         Ok(())
     }
 
-    /// Code 7 and its operands.
+    /// Code 7 and its operands. A subshape's own vector scale (codes 3 and 4) belongs to it: the
+    /// caller keeps the scale it had. gbcbig.shx's glyphs divide their vectors inside a shared
+    /// subshape and then move in full design units; letting the division escape shrank every
+    /// character about eight times.
     fn subshape(&mut self, r: &mut Cur, exec: bool, depth: usize) -> Res {
+        let scale = self.scale;
+        let res = self.subshape_inner(r, exec, depth);
+        self.scale = scale;
+        res
+    }
+
+    /// [`Pen::subshape`] with the caller's scale still in force.
+    fn subshape_inner(&mut self, r: &mut Cur, exec: bool, depth: usize) -> Res {
         match self.font.kind {
             ShxKind::Unifont => {
                 let n = u16::from_be_bytes([r.byte()?, r.byte()?]);

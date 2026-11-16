@@ -2856,6 +2856,25 @@ fn mirrored_text_extrusion_keeps_its_footprint() {
     assert!((list.bounds.max.x - 10.0).abs() < 1e-6 && list.bounds.min.x < 9.5, "drawn left of (10,5): {:?}", list.bounds);
 }
 
+/// A left-justified TEXT is placed by its insertion point (group 10); group 11 only places text
+/// whose horizontal alignment is not left. Titles and notes in a sheet carried a stale second
+/// point 32 units below their insertion point, and taking it drew them over the tables below.
+#[test]
+fn left_justified_text_keeps_its_insertion_point() {
+    let text = "0\nSECTION\n2\nENTITIES\n0\nTEXT\n8\n0\n10\n10\n20\n20\n40\n4\n73\n1\n11\n10\n21\n-12\n1\nAB\n0\nENDSEC\n0\nEOF\n";
+    let d = read(text.as_bytes(), "t.dxf").unwrap();
+    let t = first(&d, |k| if let EntityKind::Text(t) = k { Some(t.clone()) } else { None });
+    assert_eq!((t.insert.x, t.insert.y), (10.0, 20.0));
+    let a = t.align_pt.expect("a bottom-justified text has an alignment point");
+    assert_eq!((a.x, a.y), (10.0, 20.0), "the insertion point, not the stale second one");
+    // Centre-justified text is placed by the second alignment point, as before.
+    let centred = "0\nSECTION\n2\nENTITIES\n0\nTEXT\n8\n0\n10\n10\n20\n20\n40\n4\n72\n1\n73\n1\n11\n30\n21\n25\n1\nAB\n0\nENDSEC\n0\nEOF\n";
+    let d = read(centred.as_bytes(), "c.dxf").unwrap();
+    let t = first(&d, |k| if let EntityKind::Text(t) = k { Some(t.clone()) } else { None });
+    let a = t.align_pt.expect("centred text has an alignment point");
+    assert_eq!((a.x, a.y), (30.0, 25.0));
+}
+
 #[test]
 fn mirrored_mtext_extrusion_keeps_its_footprint() {
     // MTEXT at (0,0) with direction (1,0), top-left attachment and extrusion (0,0,-1): the line height

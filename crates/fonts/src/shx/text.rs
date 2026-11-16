@@ -4,8 +4,9 @@
 //! code page (its lead byte in an escape range) from the big font, others from the main font
 //! (character code, or Unicode in a Unicode font; `%%d` `%%p` `%%c` from shapes 256–258 or their
 //! older or Unicode places). A font draws at text height / its `above` value, and its pen's end
-//! position is the advance: there is no added letter gap. Characters neither font has come from
-//! the built-in stroke font (and its fallback fonts), so nothing goes missing.
+//! position is the advance (a big font's characters take a square cell instead): there is no
+//! added letter gap. Characters neither font has come from the built-in stroke font (and its
+//! fallback fonts), so nothing goes missing.
 //!
 //! Vertical text (a style flag, for fonts with modes 2) runs each shape's vertical-only
 //! commands (code 14) and follows the pen downward.
@@ -136,6 +137,17 @@ fn finite_or(v: f64, d: f64) -> f64 {
     if v.is_finite() { v } else { d }
 }
 
+/// The advance of `g` in `f`: a big font's characters take the cell its record gives, whatever
+/// the pen stops at; other fonts advance to the pen's end.
+fn advance(f: &ShxFont, g: &super::ShxGlyph) -> Vec2 {
+    if f.kind() == ShxKind::BigFont {
+        let cell = if f.above() > 0.0 { f.above() } else { g.advance.x };
+        Vec2::new(cell, 0.0)
+    } else {
+        g.advance
+    }
+}
+
 /// Shape one line (baseline at y = 0, x from 0).
 pub(crate) fn shape(t: &ShxText, s: &str, height: f64, width_factor: f64, oblique: f64) -> Shaped {
     let h = if height.is_finite() && height > 0.0 { height } else { 1.0 };
@@ -159,14 +171,18 @@ pub(crate) fn shape(t: &ShxText, s: &str, height: f64, width_factor: f64, obliqu
             let x0 = pen.x;
             match pick(t, c).and_then(|(f, n)| Some((f, f.glyph(n, t.vertical)?))) {
                 Some((f, g)) => {
-                    let k = h / f.units_per_height();
+                    let k = h / f.design_height();
                     let place = |p: Vec2| Vec2::new(pen.x + p.x * k * wf + p.y * k * shear, pen.y + p.y * k);
                     for st in &g.strokes {
                         let pts: Vec<Vec2> = st.iter().map(|p| place(*p)).collect();
                         max_x = pts.iter().fold(max_x, |m, p| m.max(p.x));
                         out.strokes.push(pts);
                     }
-                    let adv = Vec2::new(g.advance.x * k * wf, g.advance.y * k);
+                    // A big font is a grid of square cells: the pen's end is not the character
+                    // width, and a glyph that stops short of its cell's right edge would run
+                    // into the next one.
+                    let adv = advance(f, &g);
+                    let adv = Vec2::new(adv.x * k * wf, adv.y * k);
                     pen = if t.vertical { pen + adv } else { Vec2::new(pen.x + adv.x, pen.y) };
                 }
                 None => {
@@ -204,7 +220,7 @@ pub(crate) fn width(t: &ShxText, s: &str, height: f64, width_factor: f64) -> f64
         .into_iter()
         .filter(|(c, _, _)| !bidi::is_format_control(*c))
         .map(|(c, _, _)| match pick(t, c).and_then(|(f, n)| Some((f, f.glyph(n, false)?))) {
-            Some((f, g)) => g.advance.x * h / f.units_per_height() * wf,
+            Some((f, g)) => advance(f, &g).x * h / f.design_height() * wf,
             None => crate::stroke_advance(c, h, wf),
         })
         .sum::<f64>()
