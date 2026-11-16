@@ -107,11 +107,27 @@ pub(super) fn text_from(t: &T) -> Text {
         3 => VAlign::Top,
         _ => VAlign::Baseline,
     };
+    let height = t.fd(40, 0.2).max(1e-9);
     let align = if t.f(11).is_some() { Some(t.p(11)) } else { None };
+    // For left-justified text AutoCAD places by the insertion point (group 10), where the
+    // vertical justification applies; group 11 places text whose horizontal alignment is not
+    // left (centre, right, aligned, fit, middle). A file can still carry a second point for left
+    // text — this sheet's titles and notes had one eight text heights below their insertion
+    // point, and taking it drew them over the tables below — so one that disagrees with the
+    // insertion point is replaced by it (a missing one stays missing, as the text is placed by
+    // its insertion point then).
+    let align_pt = match (h, v) {
+        (HAlign::Left, VAlign::Baseline) => None,
+        (HAlign::Left, _) => match align {
+            Some(a) if a.xy().dist(t.p(10).xy()) > 2.0 * height => Some(t.p(10)),
+            other => other,
+        },
+        _ => align,
+    };
     let mut text = Text {
         insert: t.p(10),
-        align_pt: if h == HAlign::Left && v == VAlign::Baseline { None } else { align },
-        height: t.fd(40, 0.2).max(1e-9),
+        align_pt,
+        height,
         value: mtext_dxf::decode_line(&t.s(1).unwrap_or_default()),
         rotation: t.fd(50, 0.0).to_radians(),
         width_factor: t.fd(41, 1.0),
