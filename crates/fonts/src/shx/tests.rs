@@ -254,6 +254,20 @@ fn big_font_characters_advance_by_their_cell() {
     assert!((width(&t, "\u{3042}\u{3042}", 8.0, 1.0) - 16.0).abs() < 1e-9);
 }
 
+/// A big font can declare a height its shapes don't use: gbcbig.shx declares 64 and draws to
+/// 82–89, which drew Chinese text 1.4 times the text height where AutoCAD draws it at the text
+/// height. Text scales by what the shapes draw; the cell stays the record's `above`.
+#[test]
+fn a_big_font_scales_by_what_its_shapes_draw() {
+    let f = font("*BIGFONT 1,1,081,09F\n*0,4,tall\n8,0,0,0\n*082A0,8,tall glyph\n2,8,(0,0),1,8,(0,12),0\n");
+    assert!((f.design_height() - 12.0).abs() < 1e-9, "{}", f.design_height());
+    let t = ShxText::new(None, Some(std::sync::Arc::new(f)), "cadcraft tall", false);
+    let sh = shape(&t, "\u{3042}", 10.0, 1.0, 0.0);
+    let (lo, hi) = sh.strokes.iter().flatten().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
+    assert!((hi - lo - 10.0).abs() < 1e-6, "glyph height {} at text height 10", hi - lo);
+    assert!((sh.width - 8.0 * 10.0 / 12.0).abs() < 1e-6, "cell {}", sh.width);
+}
+
 #[test]
 fn cyclic_and_deep_subshapes_are_bounded() {
     let f = font("*1,3,SELF\n7,1,0\n*2,3,A\n7,3,0\n*3,3,B\n7,2,0\n*4,3,MISSING\n7,9,0\n");

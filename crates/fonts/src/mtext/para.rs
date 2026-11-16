@@ -7,7 +7,7 @@
 
 use cadcraft_geom::{Bounds2, Vec2};
 
-use super::{Atom, Fmt, MTextLayout, MTextParams, MTextPiece, Seg, arg, num, parse, seg_plain, seg_shape, seg_width, split_thai};
+use super::{Atom, Fmt, MTextLayout, MTextParams, MTextPiece, Seg, arg, num, parse, seg_plain, seg_shape, seg_width, split_wraps};
 
 /// Columns an MTEXT's text flows through, each as wide as the MTEXT's width.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -516,7 +516,9 @@ impl<'a> LineBuilder<'a> {
     }
 
     /// Place a word (`index` > 0: the part of a word after a tab, with no space before it). A
-    /// word too wide for a line of its own breaks between its Thai words (see `split_thai`).
+    /// word containing wide characters always breaks between them, so a Chinese line fills to the
+    /// column as AutoCAD's does; a word too wide for a line of its own breaks as well (see
+    /// `split_wraps`).
     fn push_text(&mut self, index: usize, segments: &[(Seg, usize)]) {
         // An empty line can't wrap, so the word gets the room from where the line starts (a
         // first-line indent or a tab stop); otherwise it can wrap to a line at the left indent.
@@ -525,8 +527,9 @@ impl<'a> LineBuilder<'a> {
             let start = if self.line.items.is_empty() { self.line.width } else { props.left.max(0.0) };
             self.available_width(props) - start
         };
-        if self.width > 0.0 && self.word_width(segments) > room + 1e-9 {
-            for (k, piece) in split_thai(segments.to_vec()).iter().enumerate() {
+        let wide = segments.iter().any(|(seg, _)| matches!(seg, Seg::Text(t) if t.chars().any(crate::is_wide)));
+        if self.width > 0.0 && (wide || self.word_width(segments) > room + 1e-9) {
+            for (k, piece) in split_wraps(segments.to_vec()).iter().enumerate() {
                 self.place(if k == 0 { index } else { index.max(1) }, piece);
             }
         } else {

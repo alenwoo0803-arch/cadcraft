@@ -131,6 +131,9 @@ pub struct ShxFont {
     /// Whether a one-byte font holds Hebrew letters at their Windows-1255 / DOS 862 places,
     /// worked out on first use ([`ShxFont::hebrew_places`]).
     hebrew: std::sync::OnceLock<(bool, bool)>,
+    /// The height a big font's shapes draw, worked out on first use
+    /// ([`ShxFont::design_height`]).
+    design: std::sync::OnceLock<f64>,
 }
 
 impl std::fmt::Debug for ShxFont {
@@ -178,6 +181,43 @@ impl ShxFont {
     /// The units per text height: [`Self::above`], or 1 for a file without a font record.
     pub fn units_per_height(&self) -> f64 {
         if self.above > 0.0 { self.above } else { 1.0 }
+    }
+    /// The height the font's shapes draw, in font units: what text is scaled by. A big font's
+    /// record can name a height its shapes don't use — gbcbig.shx declares 64 and draws to 82–89
+    /// — and scaling by the record drew every Chinese character 1.4 times the text height, where
+    /// AutoCAD draws it at the text height ([`Self::above`] stays the cell width).
+    pub fn design_height(&self) -> f64 {
+        if self.kind != ShxKind::BigFont {
+            return self.units_per_height();
+        }
+        *self.design.get_or_init(|| self.measured_design_height())
+    }
+
+    /// The 90th percentile of the glyph heights a bounded sample draws: full-height characters
+    /// (most of a big font) set it, and one outsized glyph cannot.
+    fn measured_design_height(&self) -> f64 {
+        const SAMPLES: usize = 96;
+        let numbers = self.shape_numbers();
+        if numbers.is_empty() {
+            return self.units_per_height();
+        }
+        let step = numbers.len().div_ceil(SAMPLES).max(1);
+        let mut heights: Vec<f64> = numbers
+            .iter()
+            .step_by(step)
+            .take(SAMPLES)
+            .filter_map(|n| {
+                let g = self.glyph(*n, false)?;
+                let (lo, hi) = g.strokes.iter().flatten().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.y), b.max(p.y)));
+                (hi > lo && hi.is_finite() && lo.is_finite()).then_some(hi - lo)
+            })
+            .collect();
+        if heights.is_empty() {
+            return self.units_per_height();
+        }
+        heights.sort_by(|a, b| a.total_cmp(b));
+        let h = heights[(heights.len() - 1) * 9 / 10];
+        if h.is_finite() && h > 0.0 { h } else { self.units_per_height() }
     }
     /// Big font escape ranges: `(first, last)` lead bytes.
     pub fn escape_ranges(&self) -> &[(u16, u16)] {

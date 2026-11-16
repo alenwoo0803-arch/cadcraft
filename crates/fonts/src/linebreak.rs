@@ -1,10 +1,13 @@
-//! Line-break opportunities inside Thai text, for MTEXT word wrap.
+//! Line-break opportunities inside text that has no spaces to wrap at: between Thai words and
+//! around East Asian wide characters (CJK, kana, Hangul).
 //!
 //! Thai is written without spaces between words (a space ends a phrase or sentence), so a run of
-//! Thai can only wrap where one word ends and the next begins. Those places come from the Unicode
-//! line breaking algorithm (UAX #14), which leaves Thai to a word segmenter: `icu_segmenter`'s
-//! compiled-in LSTM model for Southeast Asian scripts. Only breaks between two Thai characters
-//! are used, so text in other scripts wraps at spaces exactly as before.
+//! Thai can only wrap where one word ends and the next begins. Chinese and Japanese write without
+//! spaces at all, so their text may wrap between (nearly) every pair of characters. Those places
+//! come from the Unicode line breaking algorithm (UAX #14), which leaves Thai to a word
+//! segmenter: `icu_segmenter`'s compiled-in LSTM model for Southeast Asian scripts. Only breaks
+//! between two Thai characters or beside a wide character are used, so text in other scripts
+//! wraps at spaces exactly as before.
 //!
 //! The model rather than ICU's Thai dictionary: after a word the dictionary lacks (names,
 //! loanwords such as เมทัลชีท) the dictionary segmenter loses its place and breaks inside the
@@ -60,11 +63,13 @@ fn cache() -> &'static RwLock<Cache> {
     CACHE.get_or_init(|| RwLock::new(Cache::default()))
 }
 
-/// Character offsets in `text`, ascending, where a line may break between two Thai characters
-/// (between two Thai words, at a cluster boundary). Empty when `text` has no Thai, is longer than
-/// [`MAX_CHARS`], or the segmenter fails.
-pub(crate) fn thai_breaks(text: &str) -> Arc<[usize]> {
-    if !text.chars().any(is_thai) || text.chars().nth(MAX_CHARS).is_some() {
+/// Character offsets in `text`, ascending, where a line may break without splitting a word:
+/// between two Thai characters (between two Thai words, at a cluster boundary) and around East
+/// Asian wide characters (CJK, kana, Hangul), which wrap between them as AutoCAD's MTEXT does.
+/// Empty when `text` has neither Thai nor wide characters, is longer than [`MAX_CHARS`], or the
+/// segmenter fails.
+pub(crate) fn wrap_breaks(text: &str) -> Arc<[usize]> {
+    if !text.chars().any(|c| is_thai(c) || crate::is_wide(c)) || text.chars().nth(MAX_CHARS).is_some() {
         return Arc::default();
     }
     if let Some(found) = cache().read().unwrap_or_else(PoisonError::into_inner).entries.get(text) {
@@ -83,7 +88,7 @@ pub(crate) fn thai_breaks(text: &str) -> Arc<[usize]> {
     breaks
 }
 
-/// [`thai_breaks`] without the cache.
+/// [`wrap_breaks`] without the cache.
 fn segment(text: &str) -> Vec<usize> {
     let chars: Vec<(usize, char)> = text.char_indices().collect();
     // A last-resort guard around the segmenter: a panic in it must not take the drawing down
@@ -95,7 +100,14 @@ fn segment(text: &str) -> Vec<usize> {
         .filter(|&i| {
             let prev = i.checked_sub(1).and_then(|p| chars.get(p)).map(|(_, c)| *c);
             let next = chars.get(i).map(|(_, c)| *c);
-            matches!((prev, next), (Some(p), Some(n)) if is_thai(p) && is_thai(n) && cluster_boundary(p, n))
+            match (prev, next) {
+                (Some(p), Some(n)) if is_thai(p) && is_thai(n) => cluster_boundary(p, n),
+                // Around wide characters the Unicode line breaking rules already say where a
+                // line may start or end (`，` never begins one); only those places are used, so
+                // Latin words keep wrapping at spaces only.
+                (Some(p), Some(n)) => crate::is_wide(p) || crate::is_wide(n),
+                _ => false,
+            }
         })
         .collect()
 }
@@ -104,20 +116,31 @@ fn segment(text: &str) -> Vec<usize> {
 mod tests {
     use super::*;
 
-    /// The pieces of `text` between its Thai breaks.
+    /// The pieces of `text` between its wrap breaks.
     fn words(text: &str) -> Vec<String> {
         let chars: Vec<char> = text.chars().collect();
         let mut out = Vec::new();
         let mut from = 0;
-        for at in thai_breaks(text).iter().copied().chain(std::iter::once(chars.len())) {
+        for at in wrap_breaks(text).iter().copied().chain(std::iter::once(chars.len())) {
             out.push(chars.get(from..at).unwrap_or_default().iter().collect());
             from = at;
         }
         out
     }
 
+    /// Chinese writes no spaces at all: its text may wrap between characters, while a fullwidth
+    /// comma stays at the end of a line and Latin words stay whole.
     #[test]
-    fn thai_breaks_between_words() {
+    fn wide_text_wraps_between_characters() {
+        let pieces = words("施工图汇总说明，新立电杆");
+        assert!(pieces.len() > 4, "{pieces:?}");
+        assert!(!pieces.iter().skip(1).any(|p| p.starts_with('，')), "{pieces:?}");
+        assert!(wrap_breaks("hello world").is_empty(), "Latin wraps at spaces only");
+        assert!(wrap_breaks("").is_empty());
+    }
+
+    #[test]
+    fn wrap_breaks_between_words() {
         assert_eq!(words("ภาษาไทย"), ["ภาษา", "ไทย"]);
         assert_eq!(words("เหล็กกล่อง"), ["เหล็ก", "กล่อง"]);
         assert_eq!(words("น้ำทำให้ไม่ใช่"), ["น้ำ", "ทำ", "ให้", "ไม่", "ใช่"]);
@@ -168,36 +191,36 @@ mod tests {
 
     #[test]
     fn other_scripts_and_mixed_text_keep_their_breaks() {
-        assert!(thai_breaks("hello world").is_empty());
-        assert!(thai_breaks("").is_empty());
+        assert!(wrap_breaks("hello world").is_empty());
+        assert!(wrap_breaks("").is_empty());
         // Between Thai and Latin or digits there is no break added (spaces still break).
         let text = "ขนาด50x50mm";
-        assert!(thai_breaks(text).is_empty(), "{:?}", thai_breaks(text));
+        assert!(wrap_breaks(text).is_empty(), "{:?}", wrap_breaks(text));
     }
 
     #[test]
     fn hostile_text_never_panics_and_stays_bounded() {
         for s in ["\u{0E33}\u{0E33}\u{0E33}", "\u{0E4C}\u{0E49}\u{0E34}", "ก\u{0E49}\u{0E49}\u{0E49}", "ก\u{200B}ข\u{FFFF}\u{10FFFF}ค"] {
             let n = s.chars().count();
-            assert!(thai_breaks(s).iter().all(|&i| i > 0 && i < n));
+            assert!(wrap_breaks(s).iter().all(|&i| i > 0 && i < n));
         }
-        assert!(thai_breaks(&"ภาษาไทย".repeat(MAX_CHARS)).is_empty(), "too long: no lookup");
+        assert!(wrap_breaks(&"ภาษาไทย".repeat(MAX_CHARS)).is_empty(), "too long: no lookup");
         // The limit is on characters, not bytes (a Thai character is three bytes).
-        assert!(!thai_breaks(&"ภาษาไทย".repeat(MAX_CHARS / 7)).is_empty());
+        assert!(!wrap_breaks(&"ภาษาไทย".repeat(MAX_CHARS / 7)).is_empty());
         let long = "ภาษาไทย".repeat(MAX_CHARS / 8);
         let n = long.chars().count();
-        let b = thai_breaks(&long);
+        let b = wrap_breaks(&long);
         assert!(!b.is_empty() && b.windows(2).all(|w| w[0] < w[1]) && b.iter().all(|&i| i < n));
     }
 
     #[test]
     fn cached_breaks_match_and_the_cache_stays_bounded() {
         let text = "เหล็กกล่องขนาดมาตรฐาน";
-        assert_eq!(thai_breaks(text), segment(text).into());
-        assert_eq!(thai_breaks(text), thai_breaks(text));
+        assert_eq!(wrap_breaks(text), segment(text).into());
+        assert_eq!(wrap_breaks(text), wrap_breaks(text));
         // Many different texts: the cache empties itself rather than growing.
         for i in 0..MAX_CACHED + 10 {
-            let _ = thai_breaks(&format!("ภาษา{i}ไทย"));
+            let _ = wrap_breaks(&format!("ภาษา{i}ไทย"));
         }
         let c = cache().read().unwrap_or_else(PoisonError::into_inner);
         assert!(c.entries.len() <= MAX_CACHED && c.bytes <= MAX_CACHED_BYTES);

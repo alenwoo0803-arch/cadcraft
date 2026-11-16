@@ -137,10 +137,15 @@ fn finite_or(v: f64, d: f64) -> f64 {
     if v.is_finite() { v } else { d }
 }
 
-/// The advance of `g` in `f`: a big font's characters fill a square cell, whatever its pen
-/// stops at; other fonts advance to the pen's end.
+/// The advance of `g` in `f`: a big font's characters take the cell its record gives, whatever
+/// the pen stops at; other fonts advance to the pen's end.
 fn advance(f: &ShxFont, g: &super::ShxGlyph) -> Vec2 {
-    if f.kind() == ShxKind::BigFont { Vec2::new(f.units_per_height(), 0.0) } else { g.advance }
+    if f.kind() == ShxKind::BigFont {
+        let cell = if f.above() > 0.0 { f.above() } else { g.advance.x };
+        Vec2::new(cell, 0.0)
+    } else {
+        g.advance
+    }
 }
 
 /// Shape one line (baseline at y = 0, x from 0).
@@ -166,7 +171,7 @@ pub(crate) fn shape(t: &ShxText, s: &str, height: f64, width_factor: f64, obliqu
             let x0 = pen.x;
             match pick(t, c).and_then(|(f, n)| Some((f, f.glyph(n, t.vertical)?))) {
                 Some((f, g)) => {
-                    let k = h / f.units_per_height();
+                    let k = h / f.design_height();
                     let place = |p: Vec2| Vec2::new(pen.x + p.x * k * wf + p.y * k * shear, pen.y + p.y * k);
                     for st in &g.strokes {
                         let pts: Vec<Vec2> = st.iter().map(|p| place(*p)).collect();
@@ -215,7 +220,7 @@ pub(crate) fn width(t: &ShxText, s: &str, height: f64, width_factor: f64) -> f64
         .into_iter()
         .filter(|(c, _, _)| !bidi::is_format_control(*c))
         .map(|(c, _, _)| match pick(t, c).and_then(|(f, n)| Some((f, f.glyph(n, false)?))) {
-            Some((f, g)) => advance(f, &g).x * h / f.units_per_height() * wf,
+            Some((f, g)) => advance(f, &g).x * h / f.design_height() * wf,
             None => crate::stroke_advance(c, h, wf),
         })
         .sum::<f64>()

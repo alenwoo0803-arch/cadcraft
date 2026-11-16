@@ -556,20 +556,21 @@ fn parse(contents: &str, base: Fmt) -> (Vec<Atom>, Vec<Fmt>) {
     (atoms, fmts)
 }
 
-/// `word` split where a line may wrap inside it: between two Thai words, as Thai writes no
-/// spaces between words ([`crate::linebreak::thai_breaks`]). The pieces keep the word's segments
-/// and formats in order and are laid out side by side, so the text looks the same and only gains
-/// places to wrap. A word without Thai comes back whole.
+/// `word` split where a line may wrap inside it: between two Thai words (Thai writes no spaces
+/// between words) and between East Asian wide characters (Chinese and Japanese write no spaces
+/// at all), as [`crate::linebreak::wrap_breaks`] finds. The pieces keep the word's segments and
+/// formats in order and are laid out side by side, so the text looks the same and only gains
+/// places to wrap. A word with neither Thai nor wide characters comes back whole.
 ///
 /// Lines still wrap at spaces first, as before: only a word too wide for a line of its own (which
 /// would run out of the column) is split, so text that fits keeps its line breaks, as its author
 /// saw them.
-fn split_thai(word: Vec<(Seg, usize)>) -> Vec<Vec<(Seg, usize)>> {
-    if !word.iter().any(|(seg, _)| matches!(seg, Seg::Text(t) if t.chars().any(crate::complex::is_thai))) {
+fn split_wraps(word: Vec<(Seg, usize)>) -> Vec<Vec<(Seg, usize)>> {
+    if !word.iter().any(|(seg, _)| matches!(seg, Seg::Text(t) if t.chars().any(|c| crate::complex::is_thai(c) || crate::is_wide(c)))) {
         return vec![word];
     }
     // The word's characters, a stacked fraction standing as one object replacement character
-    // (never next to a Thai break).
+    // (never next to a wrap break).
     let text: String = word
         .iter()
         .map(|(seg, _)| match seg {
@@ -577,7 +578,7 @@ fn split_thai(word: Vec<(Seg, usize)>) -> Vec<Vec<(Seg, usize)>> {
             Seg::Stack(..) => "\u{FFFC}",
         })
         .collect();
-    let breaks = crate::linebreak::thai_breaks(&text);
+    let breaks = crate::linebreak::wrap_breaks(&text);
     if breaks.is_empty() {
         return vec![word];
     }
@@ -781,10 +782,14 @@ fn plain_lines(atoms: &[Atom], fmts: &[Fmt], base: &Fmt, width: f64) -> Vec<Line
             Atom::Word(word) => {
                 let word_width =
                     |segments: &[(Seg, usize)]| -> f64 { segments.iter().map(|(segment, format)| seg_width(segment, fmt(*format))).sum() };
-                // Wider than the column: Thai breaks between its words (see `split_thai`).
+                // Words with break opportunities inside them (Thai, CJK) are split: a Chinese
+                // line fills to the column and wraps inside such a word, as AutoCAD's does.
+                // Thai only splits when the word alone would overflow, keeping its line breaks
+                // as its author saw them.
+                let wide = word.iter().any(|(seg, _)| matches!(seg, Seg::Text(t) if t.chars().any(crate::is_wide)));
                 let split;
-                let pieces = if width > 0.0 && word_width(word) > width + 1e-9 {
-                    split = split_thai(word.clone());
+                let pieces = if width > 0.0 && (wide || word_width(word) > width + 1e-9) {
+                    split = split_wraps(word.clone());
                     split.as_slice()
                 } else {
                     std::slice::from_ref(word)
@@ -1070,6 +1075,48 @@ mod tests {
         assert!((l.bounds.width() - 8.0).abs() < 1e-9);
     }
 
+    /// AutoCAD fills a Chinese line to the column and wraps inside the run there; moving the
+    /// whole run to the next line leaves a short line and adds lines.
+    #[test]
+    fn chinese_lines_fill_the_column() {
+        let text = "2、绝缘钢芯铝绞线架设 JKLGYJ-70mm2/0.839千米，沿墙线路敷设 BLVV-240mm2导线0.9千米，沿墙线路敷设 BLVV-120mm2导线7.2千米";
+        let width = 40.0;
+        let l = lay(text, width);
+        assert!(l.lines.len() >= 2, "{:?}", l.lines);
+        for line in &l.lines[..l.lines.len() - 1] {
+            let w = crate::line_width(line, 1.0, 1.0);
+            assert!(w > 0.7 * width, "a line stops at {w} of {width}: {:?}", l.lines);
+        }
+    }
+
+    /// The same fill through the paragraph path (`\p` codes, as the drawing's summary MTEXT
+    /// has), not the plain one.
+    #[test]
+    fn chinese_lines_fill_the_column_with_paragraph_codes() {
+        let text = "\\pi0;短 施工图汇总说明新立电杆基础施工二十六基 绝缘钢芯铝绞线架设沿墙线路敷设新立电杆基础施工二十六基";
+        let width = 40.0;
+        let l = lay(text, width);
+        assert!(l.lines.len() >= 2, "{:?}", l.lines);
+        for line in &l.lines[..l.lines.len() - 1] {
+            let w = crate::line_width(line, 1.0, 1.0);
+            assert!(w > 0.7 * width, "a line stops at {w} of {width}: {:?}", l.lines);
+        }
+    }
+
+    /// Chinese writes no spaces, so a paragraph is one word to a wrapper that only knows spaces:
+    /// it still wraps at the column (the labels in 城月#5公变…'s summary did not), keeping a Latin
+    /// run inside it whole.
+    #[test]
+    fn chinese_wraps_between_characters() {
+        let text = "施工图汇总说明：新立190mmX8m电杆33基，10米电杆基础施工26基，绝缘钢芯铝绞线架设";
+        let one = lay(text, 0.0).bounds.width();
+        let l = lay(text, one / 4.0);
+        assert!(l.lines.len() >= 4, "{:?}", l.lines);
+        assert_eq!(l.lines.concat(), text, "nothing lost or added");
+        assert!(l.lines.iter().any(|line| line.contains("190mmX8m")), "the Latin run stays whole: {:?}", l.lines);
+        assert!(l.lines.iter().all(|line| !line.starts_with('，')), "{:?}", l.lines);
+    }
+
     #[test]
     fn middle_centre_attach() {
         let l = layout_mtext("AB", Vec2::new(5.0, 5.0), 1.0, 0.0, 5, 0.0, 1.0);
@@ -1256,7 +1303,7 @@ mod tests {
         }
         // The pieces sit side by side with nothing between them: drawn with a Thai font they are
         // as wide as the word laid out in one piece (up to kerning).
-        let pieces = split_thai(vec![(Seg::Text(text.to_string()), 0)]);
+        let pieces = split_wraps(vec![(Seg::Text(text.to_string()), 0)]);
         if one.pieces.iter().any(|p| !p.shaped.glyphs.is_empty()) {
             let base = Fmt { font: TextFont::Stroke, height: 1.0, color: None, under: false, over: false, wf: 1.0, oblique: 0.0, valign: 1 };
             let sum: f64 = pieces.iter().flatten().map(|(seg, _)| seg_width(seg, &base)).sum();
@@ -1264,8 +1311,8 @@ mod tests {
         }
         assert!(pieces.len() > 3);
         // Latin and other words stay whole; stacks keep their place.
-        assert_eq!(split_thai(vec![(Seg::Text("hello".into()), 0)]).len(), 1);
-        let mixed = split_thai(vec![(Seg::Text("ภาษา".into()), 0), (Seg::Stack("1".into(), "2".into(), '/'), 0), (Seg::Text("ภาษาไทย".into()), 1)]);
+        assert_eq!(split_wraps(vec![(Seg::Text("hello".into()), 0)]).len(), 1);
+        let mixed = split_wraps(vec![(Seg::Text("ภาษา".into()), 0), (Seg::Stack("1".into(), "2".into(), '/'), 0), (Seg::Text("ภาษาไทย".into()), 1)]);
         let flat: Vec<String> = mixed.iter().map(|p| p.iter().map(|(s, _)| seg_plain(s)).collect()).collect();
         assert_eq!(flat, ["ภาษา1/2ภาษา", "ไทย"]);
     }
